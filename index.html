@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rancho San Antonio | Interactive 3D Flipbook</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #202026;
+      color: #ffffff;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+      user-select: none;
+    }
+  </style>
+</head>
+<body class="relative h-screen w-full bg-[#202026] text-white flex flex-col justify-between overflow-hidden">
+
+  <!-- Main 3D Stage (Only side chevrons + 3D Flipbook Canvas) -->
+  <main class="relative z-10 flex-1 flex items-center justify-center px-2 md:px-10">
+    <div class="relative flex w-full max-w-[1440px] items-center justify-center">
+      <!-- Left Chevron -->
+      <button id="btn-prev" aria-label="Anterior" class="group absolute left-2 md:left-4 z-20 flex h-11 w-11 md:h-12 md:w-12 items-center justify-center rounded-full bg-black/45 text-white/90 shadow-lg border border-white/10 backdrop-blur-md transition-all hover:scale-105 hover:bg-black/75 hover:text-[#FFD7BA] disabled:pointer-events-none disabled:opacity-20">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="transition-transform group-hover:-translate-x-0.5"><path d="m15 18-6-6 6-6"/></svg>
+      </button>
+
+      <!-- 3D Deformable Page-Flip Canvas -->
+      <div class="relative w-full flex items-center justify-center">
+        <canvas id="flipbook-canvas" class="w-full max-h-[84vh] object-contain cursor-grab" style="aspect-ratio: 1152 / 704; touch-action: none;"></canvas>
+      </div>
+
+      <!-- Right Chevron -->
+      <button id="btn-next" aria-label="Siguiente" class="group absolute right-2 md:right-4 z-20 flex h-11 w-11 md:h-12 md:w-12 items-center justify-center rounded-full bg-black/45 text-white/90 shadow-lg border border-white/10 backdrop-blur-md transition-all hover:scale-105 hover:bg-black/75 hover:text-[#FFD7BA] disabled:pointer-events-none disabled:opacity-20">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="transition-transform group-hover:translate-x-0.5"><path d="m9 18 6-6-6-6"/></svg>
+      </button>
+    </div>
+  </main>
+
+  <!-- Bottom Navigation Bar -->
+  <footer class="relative z-20 bg-[#18181D]/90 px-6 py-3 backdrop-blur-md">
+    <!-- 2px Full-Width Top Progress Bar (#FFD7BA) -->
+    <div class="absolute top-0 left-0 right-0 h-[2px] w-full bg-white/10 overflow-hidden">
+      <div id="progress-bar" class="h-full bg-[#FFD7BA] transition-all duration-300 ease-out" style="width: 11.11%;"></div>
+    </div>
+
+    <div class="mx-auto flex max-w-5xl items-center justify-between gap-4">
+      <span id="spread-counter" class="rounded-md bg-white/[0.06] border border-white/10 px-2.5 py-1 font-mono text-[11px] font-medium text-[#FFD7BA]">1 / 9</span>
+
+      <div id="thumbnails-strip" class="flex items-center gap-2 overflow-x-auto py-1"></div>
+
+      <div class="w-12 hidden sm:block"></div>
+    </div>
+  </footer>
+
+  <script>
+    const SLIDES = [
+      { id: "slide-1", src: "public/slides/slide-1.png", title: "Portada" },
+      { id: "slide-2", src: "public/slides/slide-2.png", title: "Visión Patrimonial" },
+      { id: "slide-3", src: "public/slides/slide-3.jpg", title: "Estilo de Vida" },
+      { id: "slide-4", src: "public/slides/slide-4.jpg", title: "Materialidad" },
+      { id: "slide-5", src: "public/slides/slide-5.jpg", title: "Acceso Monumental" },
+      { id: "slide-6", src: "public/slides/slide-6.jpg", title: "Amenidades & Bienestar" },
+      { id: "slide-7", src: "public/slides/slide-7.jpg", title: "Vida Activa & Familia" },
+      { id: "slide-8", src: "public/slides/slide-8.png", title: "Resumen del Desarrollo" },
+      { id: "slide-9", src: "public/slides/slide-9.png", title: "Restricciones de Lotes" }
+    ];
+
+    const canvas = document.getElementById("flipbook-canvas");
+    const ctx = canvas.getContext("2d");
+
+    // Native 16:9 panoramic spread dimensions:
+    // Each half is 512 x 576 -> Full open spread is 1024 x 576 (exact 16:9 slide ratio)
+    const pageW = 512;
+    const pageH = 576;
+    const padX = 64;
+    const padY = 64;
+    const canvasW = pageW * 2 + padX * 2;
+    const canvasH = pageH + padY * 2;
+
+    let spreadIndex = 0;
+    let loadedImages = [];
+    let virtualSpreads = [];
+
+    // Spring physics state
+    const springX = { current: pageW, target: pageW, vel: 0 };
+    const springY = { current: pageH, target: pageH, vel: 0 };
+    function stepSpring(s, dt) {
+      const stiffness = 340;
+      const damping = 32;
+      const mass = 0.72;
+      const force = -stiffness * (s.current - s.target) - damping * s.vel;
+      const accel = force / mass;
+      s.vel += accel * dt;
+      s.current += s.vel * dt;
+    }
+    function jumpSpring(s, val) {
+      s.current = val;
+      s.target = val;
+      s.vel = 0;
+    }
+
+    const flipState = {
+      active: false,
+      isDragging: false,
+      isAnimatingTurn: false,
+      direction: "next",
+      originX: pageW,
+      originY: pageH,
+      targetSpreadIndex: 0,
+      lastPointerX: 0,
+      lastPointerTime: 0,
+      velocityX: 0
+    };
+
+    function rebuildSpreads() {
+      virtualSpreads = loadedImages.map((img) => {
+        const w = img.naturalWidth || 1024;
+        const h = img.naturalHeight || 576;
+        return {
+          fullImage: img,
+          left: { image: img, cropX: 0, cropY: 0, cropW: w / 2, cropH: h },
+          right: { image: img, cropX: w / 2, cropY: 0, cropW: w / 2, cropH: h }
+        };
+      });
+      updateHUD();
+    }
+
+    function updateHUD() {
+      const total = virtualSpreads.length;
+      if (total === 0) return;
+
+      document.getElementById("spread-counter").textContent = `${spreadIndex + 1} / ${total}`;
+      document.getElementById("btn-prev").disabled = spreadIndex <= 0;
+      document.getElementById("btn-next").disabled = spreadIndex >= total - 1;
+      document.getElementById("progress-bar").style.width = `${((spreadIndex + 1) / total) * 100}%`;
+
+      const strip = document.getElementById("thumbnails-strip");
+      strip.innerHTML = "";
+      SLIDES.forEach((slide, idx) => {
+        const isActive = idx === spreadIndex;
+        const btn = document.createElement("button");
+        btn.className = `group relative flex items-center overflow-hidden rounded border transition-all ${
+          isActive
+            ? "border-[#FFD7BA] ring-1 ring-[#FFD7BA]/40 scale-105 shadow-sm"
+            : "border-white/15 opacity-55 hover:opacity-100"
+        }`;
+        btn.innerHTML = `
+          <div class="h-8 w-14 bg-[#15161C]">
+            <img src="${slide.src}" alt="" class="h-full w-full object-cover" />
+          </div>
+        `;
+        btn.onclick = () => {
+          if (idx === spreadIndex) return;
+          if (idx > spreadIndex) triggerAnimatedTurn("next", idx);
+          else triggerAnimatedTurn("prev", idx);
+        };
+        strip.appendChild(btn);
+      });
+    }
+
+    function constrainToSpinePhysics(px, py, originY) {
+      let x = px;
+      let y = py;
+      const dx1 = x;
+      const dy1 = y - originY;
+      const dist1 = Math.hypot(dx1, dy1);
+      if (dist1 > pageW && dist1 > 0.0001) {
+        const s = pageW / dist1;
+        x = dx1 * s;
+        y = originY + dy1 * s;
+      }
+      const farY = pageH - originY;
+      const maxDiag = Math.hypot(pageW, pageH);
+      const dx2 = x;
+      const dy2 = y - farY;
+      const dist2 = Math.hypot(dx2, dy2);
+      if (dist2 > maxDiag && dist2 > 0.0001) {
+        const s = maxDiag / dist2;
+        x = dx2 * s;
+        y = farY + dy2 * s;
+      }
+      return { x, y };
+    }
+
+    function drawVirtualPage(vpage, dx, dy, dw, dh) {
+      ctx.save();
+      ctx.fillStyle = "#15161c";
+      ctx.fillRect(dx, dy, dw, dh);
+      if (vpage && vpage.image) {
+        ctx.drawImage(vpage.image, vpage.cropX, vpage.cropY, vpage.cropW, vpage.cropH, dx, dy, dw, dh);
+      }
+      ctx.restore();
+    }
+
+    function renderBookFrame() {
+      if (virtualSpreads.length === 0) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      if (canvas.width !== canvasW * dpr || canvas.height !== canvasH * dpr) {
+        canvas.width = canvasW * dpr;
+        canvas.height = canvasH * dpr;
+      }
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, canvasW, canvasH);
+      ctx.translate(padX + pageW, padY);
+
+      const currentSpread = virtualSpreads[spreadIndex] || virtualSpreads[0];
+      const st = flipState;
+
+      // STATIC STATE: Completely flat, zero central dividing seam, zero spine shadow/volume
+      if (!st.active) {
+        if (currentSpread.fullImage) {
+          ctx.drawImage(currentSpread.fullImage, -pageW, 0, pageW * 2, pageH);
+        }
+        ctx.restore();
+        return;
+      }
+
+      const originX = st.originX;
+      const originY = st.originY;
+      const clamped = constrainToSpinePhysics(springX.current, springY.current, originY);
+      const px = clamped.x;
+      const py = clamped.y;
+
+      const dx = originX - px;
+      const dy = originY - py;
+      const dist = Math.hypot(dx, dy);
+
+      if (dist < 1.5) {
+        if (currentSpread.fullImage) {
+          ctx.drawImage(currentSpread.fullImage, -pageW, 0, pageW * 2, pageH);
+        }
+        ctx.restore();
+        return;
+      }
+
+      // ACTIVE FLIP STATE: Volume, spine crease, and 3D shadows emerge dynamically
+      const progress = Math.min(1, Math.max(0, dist / (pageW * 2)));
+      const archFactor = Math.sin(Math.PI * progress);
+
+      const targetSpread = virtualSpreads[st.targetSpreadIndex] || currentSpread;
+
+      if (st.direction === "next") {
+        drawVirtualPage(currentSpread.left, -pageW, 0, pageW, pageH);
+        drawVirtualPage(targetSpread.right, 0, 0, pageW, pageH);
+      } else {
+        drawVirtualPage(targetSpread.left, -pageW, 0, pageW, pageH);
+        drawVirtualPage(currentSpread.right, 0, 0, pageW, pageH);
+      }
+
+      const drawDynamicSpineGutter = (intensity) => {
+        if (intensity <= 0.01) return;
+        ctx.save();
+        const leftGutter = ctx.createLinearGradient(-44, 0, 0, 0);
+        leftGutter.addColorStop(0, "rgba(0, 0, 0, 0)");
+        leftGutter.addColorStop(0.65, `rgba(0, 0, 0, ${0.16 * intensity})`);
+        leftGutter.addColorStop(0.96, `rgba(0, 0, 0, ${0.42 * intensity})`);
+        leftGutter.addColorStop(1, `rgba(255, 255, 255, ${0.06 * intensity})`);
+        ctx.fillStyle = leftGutter;
+        ctx.fillRect(-44, 0, 44, pageH);
+
+        const rightGutter = ctx.createLinearGradient(0, 0, 44, 0);
+        rightGutter.addColorStop(0, `rgba(0, 0, 0, ${0.45 * intensity})`);
+        rightGutter.addColorStop(0.35, `rgba(0, 0, 0, ${0.16 * intensity})`);
+        rightGutter.addColorStop(1, "rgba(0, 0, 0, 0)");
+        ctx.fillStyle = rightGutter;
+        ctx.fillRect(0, 0, 44, pageH);
+        ctx.restore();
+      };
+
+      const ux = dx / dist;
+      const uy = dy / dist;
+      const tx = -uy;
+      const ty = ux;
+      const curlRadius = 26 * archFactor + 6;
+      const mx = (originX + px) * 0.5;
+      const my = (originY + py) * 0.5;
+
+      const frontPage = st.direction === "next" ? currentSpread.right : currentSpread.left;
+      const backPage = st.direction === "next" ? targetSpread.left : targetSpread.right;
+      const pageMinX = st.direction === "next" ? 0 : -pageW;
+      const pageMaxX = st.direction === "next" ? pageW : 0;
+
+      // 1. Unfolded portion of turning page
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(pageMinX, 0, pageW, pageH);
+      ctx.clip();
+
+      const big = 3200;
+      ctx.beginPath();
+      ctx.moveTo(mx + tx * big, my + ty * big);
+      ctx.lineTo(mx - tx * big, my - ty * big);
+      ctx.lineTo(mx - tx * big - ux * big, my - ty * big - uy * big);
+      ctx.lineTo(mx + tx * big - ux * big, my + ty * big - uy * big);
+      ctx.closePath();
+      ctx.clip();
+
+      drawVirtualPage(frontPage, pageMinX, 0, pageW, pageH);
+
+      const preCreaseGrad = ctx.createLinearGradient(mx - ux * (curlRadius * 2.2), my - uy * (curlRadius * 2.2), mx, my);
+      preCreaseGrad.addColorStop(0, "rgba(0, 0, 0, 0)");
+      preCreaseGrad.addColorStop(0.7, `rgba(0, 0, 0, ${0.12 * archFactor})`);
+      preCreaseGrad.addColorStop(1, `rgba(255, 255, 255, ${0.09 * archFactor})`);
+      ctx.fillStyle = preCreaseGrad;
+      ctx.fillRect(pageMinX, 0, pageW, pageH);
+      ctx.restore();
+
+      drawDynamicSpineGutter(archFactor);
+
+      // 2. Lifted Polygon & Dynamic Under-Page Cast Shadow
+      const corners = [
+        { x: pageMinX, y: 0 },
+        { x: pageMaxX, y: 0 },
+        { x: pageMaxX, y: pageH },
+        { x: pageMinX, y: pageH }
+      ];
+      const liftedPoly = [];
+      for (let i = 0; i < corners.length; i++) {
+        const curr = corners[i];
+        const prev = corners[(i + corners.length - 1) % corners.length];
+        const dCurr = (curr.x - mx) * ux + (curr.y - my) * uy;
+        const dPrev = (prev.x - mx) * ux + (prev.y - my) * uy;
+        if (dCurr >= 0) {
+          if (dPrev < 0) {
+            const t = dPrev / (dPrev - dCurr);
+            liftedPoly.push({ x: prev.x + t * (curr.x - prev.x), y: prev.y + t * (curr.y - prev.y) });
+          }
+          liftedPoly.push(curr);
+        } else if (dPrev >= 0) {
+          const t = dPrev / (dPrev - dCurr);
+          liftedPoly.push({ x: prev.x + t * (curr.x - prev.x), y: prev.y + t * (curr.y - prev.y) });
+        }
+      }
+
+      if (liftedPoly.length >= 3) {
+        const reflectedPoly = liftedPoly.map((pt) => {
+          const d = (pt.x - mx) * ux + (pt.y - my) * uy;
+          const cylinderShift = curlRadius * Math.sin(Math.min(1, d / (curlRadius * 2.5)) * (Math.PI * 0.5));
+          const effectiveD = d - cylinderShift * 0.18;
+          const rx = pt.x - (d + effectiveD) * ux;
+          const ry = pt.y - (d + effectiveD) * uy - archFactor * 10 * (d / pageW);
+          return { x: rx, y: ry, d };
+        });
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-pageW, 0, pageW * 2, pageH);
+        ctx.clip();
+
+        const shadowReach = 38 + 95 * archFactor;
+        const castGrad = ctx.createLinearGradient(mx, my, mx - ux * (dist * 0.5 + shadowReach), my - uy * (dist * 0.5 + shadowReach));
+        castGrad.addColorStop(0, `rgba(0, 0, 0, ${0.52 * archFactor})`);
+        castGrad.addColorStop(0.55, `rgba(0, 0, 0, ${0.28 * archFactor})`);
+        castGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
+
+        ctx.save();
+        ctx.shadowColor = `rgba(0, 0, 0, ${0.65 * archFactor})`;
+        ctx.shadowBlur = 24 + 42 * archFactor;
+        ctx.shadowOffsetX = -ux * (12 + 26 * archFactor);
+        ctx.shadowOffsetY = 10 + 22 * archFactor;
+        ctx.fillStyle = castGrad;
+        ctx.beginPath();
+        reflectedPoly.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        const creaseShadowW = 22 + 36 * archFactor;
+        const creaseGrad = ctx.createLinearGradient(mx + ux * 6, my + uy * 6, mx - ux * creaseShadowW, my - uy * creaseShadowW);
+        creaseGrad.addColorStop(0, "rgba(0, 0, 0, 0)");
+        creaseGrad.addColorStop(0.22, `rgba(0, 0, 0, ${0.48 * archFactor})`);
+        creaseGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
+        ctx.fillStyle = creaseGrad;
+        ctx.beginPath();
+        ctx.moveTo(mx + tx * big + ux * 6, my + ty * big + uy * 6);
+        ctx.lineTo(mx - tx * big + ux * 6, my - ty * big + uy * 6);
+        ctx.lineTo(mx - tx * big - ux * creaseShadowW, my - ty * big - uy * creaseShadowW);
+        ctx.lineTo(mx + tx * big - ux * creaseShadowW, my + ty * big - uy * creaseShadowW);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+
+        // 3. Curved Back-Side of Lifted Page
+        ctx.save();
+        ctx.beginPath();
+        for (let i = 0; i < reflectedPoly.length; i++) {
+          const curr = reflectedPoly[i];
+          const next = reflectedPoly[(i + 1) % reflectedPoly.length];
+          if (i === 0) ctx.moveTo(curr.x, curr.y);
+          const midX = (curr.x + next.x) * 0.5;
+          const midY = (curr.y + next.y) * 0.5;
+          const edgeSpan = Math.hypot(next.x - curr.x, next.y - curr.y);
+          const bowAmount = archFactor * Math.min(18, edgeSpan * 0.045) * (curr.d > 5 || next.d > 5 ? 1 : 0);
+          ctx.quadraticCurveTo(midX - ux * bowAmount * 0.35, midY - bowAmount, next.x, next.y);
+        }
+        ctx.closePath();
+        ctx.clip();
+
+        ctx.save();
+        const r00 = 1 - 2 * ux * ux;
+        const r01 = -2 * ux * uy;
+        const r10 = -2 * ux * uy;
+        const r11 = 1 - 2 * uy * uy;
+        ctx.translate(0, -archFactor * 6);
+        ctx.translate(mx, my);
+        ctx.transform(r00, r10, r01, r11, 0, 0);
+        ctx.translate(-mx, -my);
+
+        if (st.direction === "next") {
+          ctx.translate(pageW, 0);
+          ctx.scale(-1, 1);
+          drawVirtualPage(backPage, 0, 0, pageW, pageH);
+        } else {
+          // Mirror within the left page area [-pageW, 0] so the reflection across
+          // the crease lands the back face (target right page) correctly oriented.
+          ctx.scale(-1, 1);
+          drawVirtualPage(backPage, 0, 0, pageW, pageH);
+        }
+        ctx.restore();
+
+        const flapSpan = Math.max(60, dist * 0.55);
+        const bellyGrad = ctx.createLinearGradient(mx, my, mx - ux * flapSpan, my - uy * flapSpan);
+        bellyGrad.addColorStop(0, `rgba(0, 0, 0, ${0.28 * archFactor})`);
+        bellyGrad.addColorStop(0.08, `rgba(255, 255, 255, ${0.24 * archFactor})`);
+        bellyGrad.addColorStop(0.28, `rgba(255, 252, 245, ${0.1 * archFactor})`);
+        bellyGrad.addColorStop(0.72, "rgba(0, 0, 0, 0.04)");
+        bellyGrad.addColorStop(1, `rgba(0, 0, 0, ${0.24 * archFactor})`);
+        ctx.fillStyle = bellyGrad;
+        ctx.fillRect(-pageW - padX, -padY, canvasW, canvasH);
+
+        ctx.strokeStyle = `rgba(255, 248, 238, ${0.22 * archFactor})`;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+
+    // Animation loop
+    let lastFrameTime = performance.now();
+    let tween = null;
+    function tick(now) {
+      const dt = Math.min(0.032, (now - lastFrameTime) / 1000);
+      lastFrameTime = now;
+
+      if (tween) {
+        const elapsed = (now - tween.startTime) / 1000;
+        const rawT = Math.min(1, elapsed / tween.duration);
+        const easeT = 1 - Math.pow(1 - rawT, 3.2);
+        tween.onUpdate(easeT);
+        if (rawT >= 1) {
+          const done = tween.onComplete;
+          tween = null;
+          if (done) done();
+        }
+      }
+
+      stepSpring(springX, dt);
+      stepSpring(springY, dt);
+      renderBookFrame();
+      requestAnimationFrame(tick);
+    }
+
+    function clientToBookCoords(clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvasW / rect.width;
+      const scaleY = canvasH / rect.height;
+      return {
+        x: (clientX - rect.left) * scaleX - (padX + pageW),
+        y: (clientY - rect.top) * scaleY - padY
+      };
+    }
+
+    function triggerAnimatedTurn(dir, customTargetIdx) {
+      if (flipState.isAnimatingTurn) return;
+      const total = virtualSpreads.length;
+      if (dir === "next" && spreadIndex >= total - 1) return;
+      if (dir === "prev" && spreadIndex <= 0) return;
+
+      const nextIdx = customTargetIdx !== undefined ? customTargetIdx : (dir === "next" ? spreadIndex + 1 : spreadIndex - 1);
+      const startX = dir === "next" ? pageW : -pageW;
+      const endX = dir === "next" ? -pageW : pageW;
+
+      flipState.active = true;
+      flipState.isDragging = false;
+      flipState.isAnimatingTurn = true;
+      flipState.direction = dir;
+      flipState.originX = startX;
+      flipState.originY = pageH;
+      flipState.targetSpreadIndex = nextIdx;
+
+      jumpSpring(springX, startX * 0.94);
+      jumpSpring(springY, pageH * 0.9);
+
+      tween = {
+        startTime: performance.now(),
+        duration: 0.72,
+        onUpdate: (t) => {
+          springX.target = startX + (endX - startX) * t;
+          springY.target = pageH - Math.sin(Math.PI * t) * (pageH * 0.28);
+        },
+        onComplete: () => {
+          spreadIndex = nextIdx;
+          flipState.active = false;
+          flipState.isAnimatingTurn = false;
+          updateHUD();
+        }
+      };
+    }
+
+    canvas.addEventListener("pointerdown", (e) => {
+      if (flipState.isAnimatingTurn) return;
+      const pt = clientToBookCoords(e.clientX, e.clientY);
+      if (pt.x < -pageW - 40 || pt.x > pageW + 40 || pt.y < -40 || pt.y > pageH + 40) return;
+
+      const dir = pt.x >= 0 ? "next" : "prev";
+      if (dir === "next" && spreadIndex >= virtualSpreads.length - 1) return;
+      if (dir === "prev" && spreadIndex <= 0) return;
+
+      canvas.setPointerCapture(e.pointerId);
+      const originX = dir === "next" ? pageW : -pageW;
+      const originY = pt.y < pageH * 0.45 ? 0 : pageH;
+
+      flipState.active = true;
+      flipState.isDragging = true;
+      flipState.direction = dir;
+      flipState.originX = originX;
+      flipState.originY = originY;
+      flipState.targetSpreadIndex = dir === "next" ? spreadIndex + 1 : spreadIndex - 1;
+      flipState.lastPointerX = pt.x;
+      flipState.lastPointerTime = performance.now();
+      flipState.velocityX = 0;
+
+      canvas.classList.replace("cursor-grab", "cursor-grabbing");
+
+      const clamped = constrainToSpinePhysics(pt.x, pt.y, originY);
+      jumpSpring(springX, clamped.x);
+      jumpSpring(springY, clamped.y);
+    });
+
+    canvas.addEventListener("pointermove", (e) => {
+      if (flipState.isAnimatingTurn || !flipState.isDragging) return;
+      const pt = clientToBookCoords(e.clientX, e.clientY);
+
+      const now = performance.now();
+      const dt = Math.max(1, now - flipState.lastPointerTime);
+      flipState.velocityX = ((pt.x - flipState.lastPointerX) / dt) * 1000;
+      flipState.lastPointerX = pt.x;
+      flipState.lastPointerTime = now;
+
+      const clamped = constrainToSpinePhysics(pt.x, pt.y, flipState.originY);
+      springX.target = clamped.x;
+      springY.target = clamped.y;
+    });
+
+    function finishDrag(e) {
+      if (!flipState.isDragging) return;
+      flipState.isDragging = false;
+      canvas.classList.replace("cursor-grabbing", "cursor-grab");
+      try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
+
+      const curX = springX.target;
+      const curY = springY.target;
+      const vx = flipState.velocityX;
+
+      const crossedSpine = flipState.direction === "next" ? curX < pageW * 0.25 : curX > -pageW * 0.25;
+      const flicked = flipState.direction === "next" ? vx < -320 : vx > 320;
+      const shouldComplete = crossedSpine || flicked;
+
+      const destX = shouldComplete ? -flipState.originX : flipState.originX;
+      const destY = flipState.originY;
+      flipState.isAnimatingTurn = true;
+
+      tween = {
+        startTime: performance.now(),
+        duration: shouldComplete ? 0.48 : 0.36,
+        onUpdate: (t) => {
+          const arc = shouldComplete ? Math.sin(Math.PI * t) * (flipState.originY === 0 ? 35 : -35) : 0;
+          springX.target = curX + (destX - curX) * t;
+          springY.target = curY + (destY - curY) * t + arc;
+        },
+        onComplete: () => {
+          if (shouldComplete) spreadIndex = flipState.targetSpreadIndex;
+          flipState.active = false;
+          flipState.isAnimatingTurn = false;
+          updateHUD();
+        }
+      };
+    }
+
+    canvas.addEventListener("pointerup", finishDrag);
+    canvas.addEventListener("pointercancel", finishDrag);
+
+    document.getElementById("btn-prev").onclick = () => triggerAnimatedTurn("prev");
+    document.getElementById("btn-next").onclick = () => triggerAnimatedTurn("next");
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight") triggerAnimatedTurn("next");
+      if (e.key === "ArrowLeft") triggerAnimatedTurn("prev");
+    });
+
+    // Load all 9 slides
+    Promise.all(
+      SLIDES.map(
+        (s) =>
+          new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => resolve(img);
+            img.src = s.src;
+          })
+      )
+    ).then((imgs) => {
+      loadedImages = imgs;
+      rebuildSpreads();
+      requestAnimationFrame(tick);
+    });
+  </script>
+</body>
+</html>
